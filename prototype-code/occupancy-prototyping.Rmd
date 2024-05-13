@@ -1,0 +1,87 @@
+---
+title: "occupancy-prototyping"
+author: "JT Miller"
+date: "2024-05-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Prototyping Occupancy Modeling on Desert Plants
+The script: (data_process.R)[https://github.com/lmguzman/occ_historical/blob/main/analysis/odonates/scripts/data_process.R] by Vaughn was referenced to build this <br>
+
+For this particular prototype, we're going to start out small with a perennial that is iconic in the Sonoran Desert: *Olneya tesota* also known as desert ironwood. <br>
+
+Load Dependencies 
+```{r}
+library(tidyverse)
+library(data.table)
+library(sf)
+library(nimble) # possibly remove
+library(raster)
+library(lubridate)
+#library(reclin) # removed from CRAN
+library(sp)
+#library(rgdal) # removed from CRAN
+library(geosphere) # possibly remove
+```
+
+#### General Outline for Occupancy Modeling as given in Shirey et al. 2023
+1. Determine the proportion of "Community Sampling Events" (CSEs) for a given species *Olneya tesota*, where CSEs are defined as sampling events where more than 1 species is collected on the same day within a 1km of eachother. 50% is the threshold to arrive at the golden standard baseline for occupancy modeling approaches. 
+2. Decide on the Spatial and Temporal Scale of the analysis, as well as the size of the occupancy intervals & visit intervals
+3. Check the Range Overlap of the species 
+4. Check the taxonomic scale and sampling methods. Should non-detections be inferred across the family and genus level? 
+5. Check whether visit history increases, decreases, or remains constant through occupancy intervals. 
+6. Remove sites that are only present for a _single_ occupancy interval. These will skew the visit history. 
+7. If visit history decreases through time and the probability of CSEs is to low, re-evaluate from step 2 onwards. 
+
+#### Set-up Data
+Load Data
+```{r}
+# Downloaded GBIF and iDigBio occurrences for all NA plant species, then subsetted the data to just those within the Sonoran Desert EPA lvl3 ecoregion
+sonoran_occ <- fread("/home/jtmiller/mybook_jt/desert-distribution-modeling/data/raw/sonoran-extent-plants.csv")
+
+# Shapefiles containing the EPA lvl 3 ecoregions 
+na_ecoregions_3 <- sf::read_sf("/home/jtmiller/mybook_jt/desert-distribution-modeling/data/raw/shapefiles/NA-level-3-epa-ecoregions/NA_CEC_Eco_Level3.shp")
+```
+
+Transform to coordinate proj to equal area, subset to just the Sonoran Desert for the question at hand. 
+```{r}
+crs_1 <- "+proj=aea +lat_1=20 +lat_2=60 +lat_0=40 +lon_0=-96 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m"
+na_ecoregions_3 <- st_transform(na_ecoregions_3, crs = crs_1)
+sonoran_shp <- subset(na_ecoregions_3, na_ecoregions_3$NA_L3NAME == "Sonoran Desert")
+```
+
+Apply a buffer to the edge of the shapefile. 
+```{r}
+sonoran_shp_b <- st_buffer(sonoran_shp, dist = 50000) # 50,000m = 50km 
+```
+
+Fix Some fields from the occurrence data, remove data missing geo-coords/those data with unreasonably high uncertainty.
+```{r}
+# fix coordinate/uncertainty fields class type
+sonoran_occ <- sonoran_occ[, latitude := as.numeric(latitude)]
+sonoran_occ <- sonoran_occ[, longitude := as.numeric(longitude)]
+sonoran_occ <- sonoran_occ[, coordinateUncertaintyInMeters := as.numeric(coordinateUncertaintyInMeters)]
+# remove records with NA coords 
+sonoran_occ <- sonoran_occ[!is.na(latitude)]
+sonoran_occ <- sonoran_occ[!is.na(longitude)]
+# remove records with high coordinate uncertainty
+sonoran_occ <- sonoran_occ[coordinateUncertaintyInMeters <= 50000] # must be less than or equal to the area of our grid cells used (50km)
+```
+Convert the occurrence data into spatial data (sf), then transform the coordinate projection to match the equal area of the shapefile projection
+```{r}
+occ_spat <- st_as_sf(sonoran_occ, coords = c("longitude", "latitude"), crs = "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs", remove = FALSE)
+occ_spat <- st_transform(occ_spat, crs = st_crs(sonoran_shp_b))
+```
+
+Subset the data to just the shapefile of the Sonoran shape (buffered)
+```{r}
+occ_spat <- occ_spat[sonoran_shp_b, ]
+```
+
+Give the data unique IDs per occurrence, then create a copy of the data with WGS84 proj for the CSEs calculations. 
+
+
