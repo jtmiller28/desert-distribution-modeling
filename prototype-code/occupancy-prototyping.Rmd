@@ -41,10 +41,10 @@ library(geosphere) # possibly remove
 Load Data
 ```{r}
 # Downloaded GBIF and iDigBio occurrences for all NA plant species, then subsetted the data to just those within the Sonoran Desert EPA lvl3 ecoregion
-sonoran_occ <- fread("/home/jtmiller/mybook_jt/desert-distribution-modeling/data/raw/sonoran-extent-plants.csv")
+sonoran_occ <- fread("/home/jtmiller/my_elements/jtmiller/desert-distribution-modeling/data/sonoran-extent-plants.csv")
 
 # Shapefiles containing the EPA lvl 3 ecoregions 
-na_ecoregions_3 <- sf::read_sf("/home/jtmiller/mybook_jt/desert-distribution-modeling/data/raw/shapefiles/NA-level-3-epa-ecoregions/NA_CEC_Eco_Level3.shp")
+na_ecoregions_3 <- sf::read_sf("/home/jtmiller/my_elements/jtmiller/desert-distribution-modeling/data/NA-level-3-epa-ecoregions/NA_CEC_Eco_Level3.shp")
 ```
 
 Transform to coordinate proj to equal area, subset to just the Sonoran Desert for the question at hand. 
@@ -83,5 +83,91 @@ occ_spat <- occ_spat[sonoran_shp_b, ]
 ```
 
 Give the data unique IDs per occurrence, then create a copy of the data with WGS84 proj for the CSEs calculations. 
+```{r}
+occ_dat <- occ_spat # make a copy
+
+# Determine species List with more than or equal to 100 obs all time
+sp_list <- as.data.frame(table(occ_dat$accepted_name)) %>% 
+  dplyr::filter(Freq >= 100)
+
+# Create filters based on temporal range of study 
+occ_dat <- occ_dat %>% 
+  dplyr::filter(between(year, 1950, 2023), !is.na(accepted_name), accepted_name != "", accepted_name %in% sp_list$Var1 ) %>% 
+  dplyr::select(accepted_name, year, latitude, longitude)
+```
+
+### Approximate the number of community visits via event dates, collector, and location
+```{r}
+comm_collxs1 <- occ_spat %>% 
+  dplyr::select(accepted_name, eventDate, recordedBy, latitude, longitude) %>% 
+  distinct() %>% 
+  dplyr::filter(!is.na(eventDate), !is.na(latitude), !is.na(longitude)) %>% 
+  dplyr::filter(!is.na(recordedBy)) %>% 
+  mutate(date_clean = ymd(eventDate)) %>% 
+  filter(date_clean > ymd("1970-01-01")) %>% 
+  data.table()
+
+comm_collxs1$recordedBy %>% table() %>% sort(decreasing = TRUE) %>% head()
+
+n_obs_day <- table(comm_collxs1$date_clean)
+single_obs_dates <- names(n_obs_day[n_obs_day == 1])
+unique_dates <- names(n_obs_day[n_obs_day] > 1)
+
+```
+```{r}
+# Cluster observations by same day within 1km square areas
+comm_coll <- occ_spat %>%
+  dplyr::select(accepted_name, eventDate, recordedBy, latitude, longitude, year)%>%
+  dplyr::filter(between(year, 1950, 2023), !is.na(accepted_name), accepted_name != "", accepted_name %in% sp_list$Var1 ) %>%
+  distinct() %>% 
+  filter(!is.na(eventDate), !is.na(latitude), !is.na(longitude)) %>% 
+  filter(!is.na(recordedBy)) %>%
+  mutate(date_clean = ymd(eventDate)) %>% 
+  filter(date_clean > ymd("1970-01-01")) %>% 
+  data.table()
+
+n_obs_day <- table(comm_coll$date_clean)
+single_obs_dates <- names(n_obs_day[n_obs_day == 1])
+unique_dates <- names(n_obs_day[n_obs_day > 1])
+
+cluster_lists <- list()
+sin_obs_data <- comm_coll[date_clean %in% ymd(single_obs_dates)]
+sin_obs_data[, "cluster" := paste0(date_clean, "-", 1)]
+cluster_lists[[1]] <- sin_obs_data
+counter <- 2
+
+for(date_use in unique_dates){
+  
+  cur_date <- comm_coll[date_clean == date_use]
+  
+  lat_lon <- cur_date[,.(longitude, latitude)]
+  
+  xy <- SpatialPointsDataFrame(
+    lat_lon, data.frame(ID=seq(1:nrow(lat_lon))),
+    proj4string=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84"))
+  
+  # use the distm function to generate a geodesic distance matrix in meters
+  mdist <- distm(xy)
+  
+  # cluster all points using a hierarchical clustering approach
+  hc <- hclust(as.dist(mdist), method="complete")
+  
+  # define the distance threshold
+  d=1000
+  
+  cur_date[, "cluster" := paste0(date_clean, "-", cutree(hc, h=d))]
+  
+  cluster_lists[[counter]] <- cur_date
+  
+  counter <- counter+1
+}
+
+all_clusters <- rbindlist(cluster_lists)
+
+size_clusters <- table(all_clusters$cluster) %>% table()
+
+# percentage of community samplings
+size_clusters[1]/sum(size_clusters[1:length(size_clusters)])
+```
 
 
